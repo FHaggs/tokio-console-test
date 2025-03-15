@@ -1,27 +1,29 @@
-// tokio_tracing_example.rs
-// A simple async program using Tokio, Tracing, and Ratatui for TUI.
-
+use crossterm::event::{self, Event, KeyCode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::text::Text;
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use tokio::{task, time::{sleep, Duration}};
-use tracing::{info, span, Level};
-use tracing_subscriber;
-use tracing_subscriber::prelude::*;
-use ratatui::{backend::CrosstermBackend, Terminal};
-use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::layout::{Layout, Constraint, Direction};
-use ratatui::text::Text;
-use crossterm::event::{self, Event, KeyCode};
-use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+use tokio::sync::mpsc;
+use tokio::{
+    task,
+    time::{Duration, sleep},
+};
+use tracing::{Level, info, span};
 use tracing_appender::non_blocking;
-
+use tracing_subscriber;
+use tracing_subscriber::prelude::*; // Import the channel
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    // Set up tracing subscriber with Tokio Console layer
+    // Redirect logs to a file instead of stdout
     let file_appender = tracing_appender::rolling::daily("./logs", "tracing.log");
     let (non_blocking, _guard) = non_blocking(file_appender);
+
+    // Set up tracing subscriber with Tokio Console layer
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_writer(non_blocking))
         .with(console_subscriber::spawn())
@@ -29,50 +31,67 @@ async fn main() -> io::Result<()> {
 
     let tasks = Arc::new(Mutex::new(Vec::new()));
 
+    // Create a channel to communicate with the Tokio runtime
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
     // Spawn a separate thread for the TUI
     let tasks_clone = Arc::clone(&tasks);
     thread::spawn(move || {
         enable_raw_mode().unwrap();
-        let stdout = io::stdout();
+        let mut stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).unwrap();
 
         loop {
-            terminal.draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Percentage(90),
-                        Constraint::Percentage(10),
-                    ]).split(f.area());
+            terminal
+                .draw(|f| {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Percentage(90), Constraint::Percentage(10)])
+                        .split(f.size());
 
-                let tasks_text = {
-                    let tasks = tasks_clone.lock().unwrap();
-                    let task_list = tasks.join("\n");
-                    Text::from(task_list)
-                };
+                    let tasks_text = {
+                        let tasks = tasks_clone.lock().unwrap();
+                        let task_list = tasks.join("\n");
+                        Text::from(task_list)
+                    };
 
-                let task_widget = Paragraph::new(tasks_text).block(Block::default().title("Tasks").borders(Borders::ALL));
-                f.render_widget(task_widget, chunks[0]);
+                    let task_widget = Paragraph::new(tasks_text)
+                        .block(Block::default().title("Tasks").borders(Borders::ALL));
+                    f.render_widget(task_widget, chunks[0]);
 
-                let instructions = Paragraph::new("Press '1', '2', or '3' to start tasks. Press 'q' to quit.")
-                    .block(Block::default().borders(Borders::ALL));
-                f.render_widget(instructions, chunks[1]);
-            }).unwrap();
+                    let instructions =
+                        Paragraph::new("Press '1', '2', or '3' to start tasks. Press 'q' to quit.")
+                            .block(Block::default().borders(Borders::ALL));
+                    f.render_widget(instructions, chunks[1]);
+                })
+                .unwrap();
 
             if event::poll(Duration::from_millis(100)).unwrap() {
                 if let Event::Key(key) = event::read().unwrap() {
                     match key.code {
                         KeyCode::Char('1') => {
-                            tasks_clone.lock().unwrap().push("Task 1 triggered".to_string());
+                            tasks_clone
+                                .lock()
+                                .unwrap()
+                                .push("Task 1 triggered".to_string());
+                            tx.send("task1".to_string()).unwrap(); // Send message to spawn Task 1
                         }
                         KeyCode::Char('2') => {
-                            tasks_clone.lock().unwrap().push("Task 2 triggered".to_string());
+                            tasks_clone
+                                .lock()
+                                .unwrap()
+                                .push("Task 2 triggered".to_string());
+                            tx.send("task2".to_string()).unwrap(); // Send message to spawn Task 2
                         }
                         KeyCode::Char('3') => {
-                            tasks_clone.lock().unwrap().push("Looping Task triggered".to_string());
+                            tasks_clone
+                                .lock()
+                                .unwrap()
+                                .push("Looping Task triggered".to_string());
+                            tx.send("looping_task".to_string()).unwrap(); // Send message to spawn Looping Task
                         }
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => break, // Quit if 'q' is pressed
                         _ => {}
                     }
                 }
@@ -82,12 +101,25 @@ async fn main() -> io::Result<()> {
         disable_raw_mode().unwrap();
     });
 
-    // Run tasks in the background
-    let task1 = task::spawn(do_work("Task 1", 10));
-    let task2 = task::spawn(do_work("Task 2", 12));
-    let task3 = task::spawn(looping_task());
-
-    let _ = tokio::join!(task1, task2, task3);
+    loop {
+        if let Some(task) = rx.recv().await {
+            match task.as_str() {
+                "task1" => {
+                    tokio::spawn(do_work("Task 1", 10)); // Spawn Task 1
+                }
+                "task2" => {
+                    tokio::spawn(do_work("Task 2", 12)); // Spawn Task 2
+                }
+                "looping_task" => {
+                    tokio::spawn(looping_task()); // Spawn Looping Task
+                }
+                _ => {
+                    // If it's an invalid task, just continue
+                    continue;
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -110,4 +142,3 @@ async fn looping_task() {
         sleep(Duration::from_secs(5)).await;
     }
 }
-
