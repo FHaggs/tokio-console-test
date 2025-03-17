@@ -5,13 +5,9 @@ use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::mpsc;
-use tokio::{
-    task,
-    time::{Duration, sleep},
-};
+use tokio::time::{Duration, sleep};
 use tracing::{Level, info, span};
 use tracing_appender::non_blocking;
 use tracing_subscriber;
@@ -29,29 +25,29 @@ async fn main() -> io::Result<()> {
         .with(console_subscriber::spawn())
         .init();
 
-    let tasks = Arc::new(Mutex::new(Vec::new()));
-
+    
     // Create a channel to communicate with the Tokio runtime
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-
+    
     // Spawn a separate thread for the TUI
-    let tasks_clone = Arc::clone(&tasks);
     thread::spawn(move || {
         enable_raw_mode().unwrap();
-        let mut stdout = io::stdout();
+        let stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut tasks = Vec::new();
 
+        // Clear
+        print!("\x1B[2J\x1B[1;1H");
         loop {
             terminal
                 .draw(|f| {
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([Constraint::Percentage(90), Constraint::Percentage(10)])
-                        .split(f.size());
+                        .split(f.area());
 
                     let tasks_text = {
-                        let tasks = tasks_clone.lock().unwrap();
                         let task_list = tasks.join("\n");
                         Text::from(task_list)
                     };
@@ -71,27 +67,21 @@ async fn main() -> io::Result<()> {
                 if let Event::Key(key) = event::read().unwrap() {
                     match key.code {
                         KeyCode::Char('1') => {
-                            tasks_clone
-                                .lock()
-                                .unwrap()
-                                .push("Task 1 triggered".to_string());
+                            tasks.push("Task 1 triggered".to_string());
                             tx.send("task1".to_string()).unwrap(); // Send message to spawn Task 1
                         }
                         KeyCode::Char('2') => {
-                            tasks_clone
-                                .lock()
-                                .unwrap()
-                                .push("Task 2 triggered".to_string());
+                            tasks.push("Task 2 triggered".to_string());
                             tx.send("task2".to_string()).unwrap(); // Send message to spawn Task 2
                         }
                         KeyCode::Char('3') => {
-                            tasks_clone
-                                .lock()
-                                .unwrap()
-                                .push("Looping Task triggered".to_string());
+                            tasks.push("Looping Task triggered".to_string());
                             tx.send("looping_task".to_string()).unwrap(); // Send message to spawn Looping Task
                         }
-                        KeyCode::Char('q') => break, // Quit if 'q' is pressed
+                        KeyCode::Char('q') => {
+                            tx.send("BREAK".to_string()).unwrap();
+                            break;
+                        }, // Quit if 'q' is pressed
                         _ => {}
                     }
                 }
@@ -112,6 +102,9 @@ async fn main() -> io::Result<()> {
                 }
                 "looping_task" => {
                     tokio::spawn(looping_task()); // Spawn Looping Task
+                }
+                "BREAK" => {
+                    break;
                 }
                 _ => {
                     // If it's an invalid task, just continue
